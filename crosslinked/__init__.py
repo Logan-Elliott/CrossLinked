@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 # Author: @m8sec
 # License: GPLv3
+
 import re
 import argparse
+import asyncio
 from sys import exit
 from csv import reader
 from crosslinked import utils
 from crosslinked.logger import *
 from crosslinked.search import CrossLinked
 
-
 def banner():
-
     VERSION = 'v0.3.0'
-
-    print('''
+    print(r'''
      _____                    _             _            _ 
     /  __ \                  | |   ({})     | |          | |
     | /  \/_ __ ___  ___ ___ | |    _ _ __ | | _____  __| |
@@ -25,7 +24,6 @@ def banner():
     '''.format(highlight('x', fg='gray'),
                highlight("@m8sec", fg='gray'),
                highlight(VERSION, fg='blue')))
-
 
 def cli():
     args = argparse.ArgumentParser(description="", formatter_class=argparse.RawTextHelpFormatter, usage=argparse.SUPPRESS)
@@ -38,7 +36,7 @@ def cli():
     s.add_argument('--search', dest='engine', default='google,bing', type=lambda x: utils.delimiter2list(x), help='Search Engine (Default=\'google,bing\')')
 
     o = args.add_argument_group("Output arguments")
-    o.add_argument('-f', dest='nformat', type=str, required=True, help='Format names, ex: \'domain\{f}{last}\', \'{first}.{last}@domain.com\'')
+    o.add_argument('-f', dest='nformat', type=str, required=True, help='Format names, ex: \'domain\\{f}{last}\', \'{first}.{last}@domain.com\'')
     o.add_argument('-o', dest='outfile', type=str, default='names', help='Change name of output file (omit_extension)')
 
     p = args.add_argument_group("Proxy arguments")
@@ -47,17 +45,18 @@ def cli():
     pr.add_argument('--proxy-file', dest='proxy', default=False, type=lambda x: utils.file_exists(x), help='Load proxies from file for rotation')
     return args.parse_args()
 
-
-def start_scrape(args):
+# Updated start_scrape function for async scraping
+async def start_scrape(args):
     tmp = []
     Log.info("Searching {} for valid employee names at \"{}\"".format(', '.join(args.engine), args.company_name))
 
     for search_engine in args.engine:
-        c = CrossLinked(search_engine,  args.company_name, args.timeout, 3, args.proxy, args.jitter)
-        if search_engine in c.url.keys():
-            tmp += c.search()
+        c = CrossLinked(search_engine, args.company_name, args.timeout, 3, args.proxy, args.jitter)
+        if search_engine in c.url_templates.keys():
+            # Await the asynchronous search method
+            await c.search()
+            tmp.extend(c.results)
     return tmp
-
 
 def start_parse(args):
     tmp = []
@@ -71,7 +70,6 @@ def start_parse(args):
             tmp.append({'name': r[2].strip()}) if r[2] else False
     return tmp
 
-
 def format_names(args, data, logger):
     tmp = []
     Log.info('{} names collected'.format(len(data)))
@@ -83,14 +81,11 @@ def format_names(args, data, logger):
             tmp.append(name)
     Log.success("{} unique names added to {}!".format(len(tmp), args.outfile+".txt"))
 
-
 def nformatter(nformat, name):
-    # Get position of name values in text
     tmp = nformat.split('}')
     f_position = int(re.search(r'(-?\d+)', tmp[0]).group(0)) if ':' in tmp[0] else 0
     l_position = int(re.search(r'(-?\d+)', tmp[1]).group(0)) if ':' in tmp[1] else -1
 
-    # Extract names from raw text
     tmp = name.split(' ')
     try:
         f_name = tmp[f_position] if len(tmp) > 2 else tmp[0]
@@ -99,7 +94,6 @@ def nformatter(nformat, name):
         f_name = tmp[0]
         l_name = tmp[-1]
 
-    # Use replace function to create final output
     val = re.sub(r'-?\d+:', '', nformat)
     val = val.replace('{f}', f_name[0])
     val = val.replace('{first}', f_name)
@@ -107,23 +101,27 @@ def nformatter(nformat, name):
     val = val.replace('{last}', l_name)
     return val
 
+import asyncio
 
 def main():
     banner()
     args = cli()
 
     try:
-        if args.debug: setup_debug_logger(); debug_args(args)                                  # Setup Debug logging
-        txt = setup_file_logger(args.outfile+".txt", log_name="cLinked_txt", file_mode='w')    # names.txt overwritten
-        csv = setup_file_logger(args.outfile+".csv", log_name="cLinked_csv", file_mode='a')    # names.csv appended
+        if args.debug: setup_debug_logger(); debug_args(args)
+        txt = setup_file_logger(args.outfile+".txt", log_name="cLinked_txt", file_mode='w')
+        csv = setup_file_logger(args.outfile+".csv", log_name="cLinked_csv", file_mode='a')
 
-        data = start_parse(args) if args.company_name.endswith('.csv') else start_scrape(args)
+        # Create a new event loop if none exists
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        data = loop.run_until_complete(
+            start_parse(args) if args.company_name.endswith('.csv') else start_scrape(args)
+        )
         format_names(args, data, txt) if len(data) > 0 else Log.warn('No results found')
     except KeyboardInterrupt:
         Log.warn("Key event detected, closing...")
         exit(0)
 
-
 if __name__ == '__main__':
     main()
-

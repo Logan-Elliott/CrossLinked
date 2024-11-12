@@ -1,181 +1,139 @@
+# file path: src/optimized_crosslinked.py
+
 import logging
-import requests
-import threading
-from time import sleep
+import asyncio
+import aiohttp
+import random
+import time
 from random import choice
 from bs4 import BeautifulSoup
 from unidecode import unidecode
 from urllib.parse import urlparse
-from crosslinked.logger import Log
 from datetime import datetime, timedelta
-from urllib3 import disable_warnings, exceptions
 
-disable_warnings(exceptions.InsecureRequestWarning)
-logging.getLogger("urllib3").setLevel(logging.WARNING)
-csv = logging.getLogger('cLinked_csv')
+# Set up logging
+logging.basicConfig(
+    filename="crosslinked_log.txt",
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
 
+# List of User-Agent strings for rotation
+USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:104.0) Gecko/20100101 Firefox/104.0',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 12.5; rv:104.0) Gecko/20100101 Firefox/104.0',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36',
+    # Add more User-Agents as needed
+]
 
-class Timer(threading.Thread):
-    def __init__(self, timeout):
-        threading.Thread.__init__(self)
-        self.start_time = None
-        self.running = None
-        self.timeout = timeout
+# List of proxies to rotate
+PROXIES = [
+    "http://proxy1:port",
+    "http://proxy2:port",
+    "http://proxy3:port"
+]
 
-    def run(self):
-        self.running = True
-        self.start_time = datetime.now()
-        logging.debug("Thread Timer: Started")
+# Introduce random sleep between 1 and 5 seconds between requests
+time.sleep(random.uniform(1, 5))
 
-        while self.running:
-            if (datetime.now() - self.start_time) > timedelta(seconds=self.timeout):
-                self.stop()
-            sleep(0.05)
+# Function to get a random User-Agent
+def get_random_user_agent():
+    return {"User-Agent": choice(USER_AGENTS)}
 
-    def stop(self):
-        logging.debug("Thread Timer: Stopped")
-        self.running = False
+# Function to get a random proxy
+def get_random_proxy(proxies):
+    if proxies:
+        proxy = choice(proxies)
+        return {"http": proxy, "https": proxy}
+    return None
 
+# Function to make web requests
+async def web_request(url, timeout, headers, proxies):
+    proxy_settings = get_random_proxy(proxies)
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, proxy=proxy_settings.get('http') if proxy_settings else None, timeout=timeout) as response:
+                if response.status == 200:
+                    html = await response.text()
+                    return html
+                else:
+                    logging.warning(f"Non-200 response: {response.status} for URL: {url}")
+                    return None
+    except Exception as e:
+        logging.error(f"Request failed for URL: {url} with error: {e}")
+        return None
 
+# Class for handling searches
 class CrossLinked:
-    def __init__(self, search_engine, target, timeout, conn_timeout=3, proxies=[], jitter=0):
+    def __init__(self, search_engine, target, timeout, conn_timeout=3, proxies=None, jitter=0):
         self.results = []
-        self.url = {'google': 'https://www.google.com/search?q=site:linkedin.com/in+"{}"&num=100&start={}',
-                    'bing': 'http://www.bing.com/search?q="{}"+site:linkedin.com/in&first={}'}
-
-        self.runtime = datetime.now().strftime('%m-%d-%Y %H:%M:%S')
+        self.url_templates = {
+            'google': 'https://www.google.com/search?q=site:linkedin.com/in+"{}"&num=100&start={}',
+            'bing': 'http://www.bing.com/search?q="{}"+site:linkedin.com/in&first={}',
+            'duckduckgo': 'https://duckduckgo.com/html?q="{}"+site:linkedin.com/in'
+        }
         self.search_engine = search_engine
-        self.conn_timeout = conn_timeout
-        self.timeout = timeout
-        self.proxies = proxies
         self.target = target
+        self.timeout = timeout
+        self.conn_timeout = conn_timeout
+        self.proxies = proxies if proxies else []
         self.jitter = jitter
 
-    def search(self):
-        search_timer = Timer(self.timeout)
-        search_timer.start()
+    async def search(self):
+        for page in range(0, 300, 10):  # Adjust the range and step as needed
+            url = self.url_templates[self.search_engine].format(self.target, page)
+            headers = get_random_user_agent()
+            html = await web_request(url, self.timeout, headers, self.proxies)
+            if html:
+                self.page_parser(html)
+                await asyncio.sleep(random.uniform(1, 5))  # Add random delay between requests
 
-        while search_timer.running:
-            try:
-                url = self.url[self.search_engine].format(self.target, len(self.results))
-                resp = web_request(url, self.conn_timeout, self.proxies)
-                http_code = get_statuscode(resp)
+    def page_parser(self, html):
+        soup = BeautifulSoup(html, "lxml")
+        links = soup.find_all("a")
+        if not links:
+            print("No links found on the page.")  # Add debugging output
+        for link in links:
+            self.results_handler(link)
 
-                if http_code != 200:
-                    Log.info("{:<3} {} ({})".format(len(self.results), url, http_code))
-                    Log.warn('None 200 response, exiting search ({})'.format(http_code))
-                    break
-
-                self.page_parser(resp)
-                Log.info("{:<3} {} ({})".format(len(self.results), url, http_code))
-
-                sleep(self.jitter)
-            except KeyboardInterrupt:
-                Log.warn("Key event detected, exiting search...")
-                break
-
-        search_timer.stop()
-        return self.results
-
-    def page_parser(self, resp):
-        for link in extract_links(resp):
-            try:
-                self.results_handler(link)
-            except Exception as e:
-                Log.warn('Failed Parsing: {}- {}'.format(link.get('href'), e))
+    def results_handler(self, link):
+        url = str(link.get('href')).lower()
+        if not urlparse(url).netloc.endswith('linkedin.com') or 'linkedin.com/in' not in url:
+            return
+        data = self.link_parser(url, link)
+        if data['name']:
+            self.log_results(data)
 
     def link_parser(self, url, link):
         u = {'url': url}
-        u['text'] = unidecode(link.text.split("|")[0].split("...")[0])  # Capture link text before trailing chars
-        u['title'] = self.parse_linkedin_title(u['text'])               # Extract job title
-        u['name'] = self.parse_linkedin_name(u['text'])                 # Extract whole name
+        u['text'] = unidecode(link.text.split("|")[0].split("...")[0])
+        u['title'] = self.parse_linkedin_title(u['text'])
+        u['name'] = self.parse_linkedin_name(u['text'])
         return u
 
     def parse_linkedin_title(self, data):
         try:
-            title = data.split("-")[1].split('https:')[0]
-            return title.split("...")[0].split("|")[0].strip()
+            return data.split("-")[1].split('https:')[0].split("...")[0].split("|")[0].strip()
         except:
             return 'N/A'
 
     def parse_linkedin_name(self, data):
         try:
-            name = data.split("-")[0].strip()
-            return unidecode(name).lower()
+            return unidecode(data.split("-")[0].strip()).lower()
         except:
             return False
 
-    def results_handler(self, link):
-        url = str(link.get('href')).lower()
-
-        if not extract_subdomain(url).endswith('linkedin.com'):
-            return False
-        elif 'linkedin.com/in' not in url:
-            return False
-
-        data = self.link_parser(url, link)
-        self.log_results(data) if data['name'] else False
-
-
     def log_results(self, d):
-        # Prevent Duplicates & non-standard responses (i.e: "<span>linkedin.com</span></a>")
-        if d in self.results:
-            return
-        elif 'linkedin.com' in d['name']:
-            return
+        if d not in self.results and 'linkedin.com' not in d['name']:
+            self.results.append(d)
+            logging.info(f"Verified name: {d['name']} | Title: {d['title']} | URL: {d['url']}")
 
-        self.results.append(d)
-        # Search results are logged to names.csv but names.txt is not generated until end to prevent duplicates
-        logging.debug('name: {:25} RawTxt: {}'.format(d['name'], d['text']))
-        csv.info('"{}","{}","{}","{}","{}","{}",'.format(self.runtime, self.search_engine, d['name'], d['title'], d['url'], d['text']))
+# Main function to run the search
+async def main():
+    target = "Target Organization"
+    search = CrossLinked(search_engine="duckduckgo", target=target, timeout=10, proxies=PROXIES)
+    await search.search()
+    print("Verified Results:", search.results)
 
-
-def get_statuscode(resp):
-    try:
-        return resp.status_code
-    except:
-        return 0
-
-
-def get_proxy(proxies):
-    tmp = choice(proxies) if proxies else False
-    return {"http": tmp, "https": tmp} if tmp else {}
-
-
-def get_agent():
-    return choice([
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:104.0) Gecko/20100101 Firefox/104.0'
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 12.5; rv:104.0) Gecko/20100101 Firefox/104.0',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.1 Safari/605.1.15',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 13_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.1 Safari/605.1.15'
-    ])
-
-
-def web_request(url, timeout=3, proxies=[], **kwargs):
-    try:
-        s = requests.Session()
-        r = requests.Request('GET', url, headers={'User-Agent': get_agent()}, cookies = {'CONSENT' : 'YES'}, **kwargs)
-        p = r.prepare()
-        return s.send(p, timeout=timeout, verify=False, proxies=get_proxy(proxies))
-    except requests.exceptions.TooManyRedirects as e:
-        Log.fail('Proxy Error: {}'.format(e))
-    except:
-        pass
-    return False
-
-
-def extract_links(resp):
-    links = []
-    soup = BeautifulSoup(resp.content, 'lxml')
-    for link in soup.findAll('a'):
-        links.append(link)
-    return links
-
-
-def extract_subdomain(url):
-    return urlparse(url).netloc
+# Run the main function
+asyncio.run(main())
